@@ -1,6 +1,7 @@
 import http from 'node:http';
 import {createHash} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
+import {createGlobalView} from './global-view.mjs';
 
 const invalid={code:'auth/invalid-credential'};
 export function credentials(value){
@@ -9,7 +10,8 @@ export function credentials(value){
   if(identifier.length>254 || (!identifier.includes('@') && !/^[A-Za-z0-9_]{3,20}$/.test(identifier)))throw invalid;
   return {identifier,password:value.password,client:value.client==='web'?'web':'native'};
 }
-export function createGateway({resolveNickname,signIn,customToken,now=Date.now,origins=['https://fly-dlc.web.app','https://fly-dlc.firebaseapp.com']}){
+export function createGateway({resolveNickname,signIn,customToken,verifyToken=async()=>{throw Error('not-configured');},now=Date.now,origins=['https://fly-dlc.web.app','https://fly-dlc.firebaseapp.com']}){
+  const globalView=createGlobalView({verify:verifyToken,now});
   const attempts=new Map(),windowMs=15*60*1000;
   function limited(key,max){
     const time=now();if(attempts.size>20000)for(const [name,entry]of attempts)if(entry.until<=time)attempts.delete(name);
@@ -22,7 +24,8 @@ export function createGateway({resolveNickname,signIn,customToken,now=Date.now,o
     const reply=(status,value)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(value));};
     if(origin && !origins.includes(origin))return reply(403,{error:{code:'auth/unauthorized-origin'}});
     if(origin){res.setHeader('Access-Control-Allow-Origin',origin);res.setHeader('Vary','Origin');res.setHeader('Access-Control-Allow-Headers','Content-Type');res.setHeader('Access-Control-Allow-Methods','POST, OPTIONS');}
-    if(req.method==='GET' && req.url==='/health')return reply(200,{status:'ok'});
+    if(req.method==='GET' && req.url==='/health')return reply(200,{status:'ok',globalView:1});
+    if(req.url==='/globalview')return globalView(req,reply);
     if(req.url!=='/login')return reply(404,{error:{code:'not-found'}});
     if(req.method==='OPTIONS'){res.writeHead(204);return res.end();}
     if(req.method!=='POST')return reply(405,{error:{code:'method-not-allowed'}});
@@ -66,7 +69,8 @@ async function production(){
       const response=await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${process.env.FIREBASE_API_KEY}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password,returnSecureToken:true}),signal:AbortSignal.timeout(15000)});
       const result=await response.json();if(!response.ok){const message=result.error?.message||'';throw {code:message.includes('TOO_MANY_ATTEMPTS')?'auth/too-many-requests':response.status>=500?'auth/service-unavailable':'auth/invalid-credential'};}return result;
     },
-    customToken:uid=>firebaseAuth.createCustomToken(uid)
+    customToken:uid=>firebaseAuth.createCustomToken(uid),
+    verifyToken:token=>firebaseAuth.verifyIdToken(token,true)
   });
   server.requestTimeout=20000;server.headersTimeout=10000;
   server.listen(Number(process.env.PORT||3000),'0.0.0.0',()=>console.log('Fly DLC account gateway ready'));
